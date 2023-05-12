@@ -1,3 +1,456 @@
 # Chapter 4
 ## 카프카 상세 개념 설명
 
+### 4-1. 토픽과 파티션
+
+- __```적정 파티션 개수```__
+
+토픽은 카프카의 성능과 관련이 있고 최초 생성시 고려해야할 사항은 3가지가 있다.
+
+```
+- 데이터 처리량
+- 메시지 키 사용 여부
+- 브로커, 컨슈머 영향도
+```
+
+파티션은 컨슈머와 1:1 매핑되므로 병렬처리의 핵심이다. 
+그렇기에 해당 토픽에 필요한 데이터 처리량을 측정하여 정해야 한다.
+
+데이터 처리 속도를 높이려면
+1. 컨슈머의 처리량을 늘린다. (서버의 스케일업, GC 튜닝, 등..)
+2. 컨슈머의 개수를 늘려서 병렬 처리량을 늘린다.
+
+프로듀서가 초당 1000개의 레코드를 보내고 컨슈머가 초당 100개의 레코드를 처리할 수 있으면 약 10개의 컨슈머가 필요하다.
+
+__*프로듀서 전송 데이터량 < 컨슈머 데이터 처리량 * 파티션 개수*__
+
+파티션 갯수가 늘어남에 따라 컨슈머, 브로커에도 부담이 되므로 무조건 늘리는 것이 능사가 아니다.
+
+```메시지 키``` 사용 여부는 데이터 처리 순서와 연관이 깊다.
+
+기본 파티셔너를 이용하면 메시지 키를 해시 변환해서 파티션에 매핑하는데 파티션의 개수가 변하면 파티션에 들어가는 규칙이 달라진다.
+
+메시지 키의 파티션 위치가 달라지기 때문에 키의 순서를 더는 보장하지 못한다.
+
+즉, 처리 순서가 보장되려면 최대한 파티션의 개수가 변하면 안된다.
+
+( 파티션의 개수가 변해야 한다면 커스텀 파티셔너를 이용한다. )
+
+- __```토픽 정리 정책```__
+
+cleanup.policy 옵션을 통해 데이터를 삭제할 수 있다.
+
+**delete policy**
+
+대부분 delete (명시적으로 데이터를 삭제) 를 옵션으로 설정한다.
+이 때, 세그먼트 단위로 삭제가 이루어진다.
+
+```segment.bytes``` 옵션을 통해 1개의 세그먼트 크기를 지정할 수 있고 해당 크기가 꽉차게 되면 새로운 세그먼트를 열어 데이터를 저장한다.
+
+(데이터 저장을 위해 열려 있는 세그먼트 = 액티브 세그먼트)
+
+삭제 기준은 시간 또는 용량이다.
+
+```
+세그먼트 파일의 마지막 수정 시간 > retention.ms => 세그먼트 삭제
+
+retention.bytes를 넘어간 세그먼트 파일 삭제
+```
+
+**compact policy**
+
+여기서의 압축은 해당 메세지 키의 레코드 중 가장 오래된 데이터를 삭제하는 것이다.
+(KTable에서 유용)
+
+압축 시작 시점은 ```min.cleanable.dirty.ratio``` 값을 따른다.
+
+( 액티브 세그먼트를 제외한 테일 영역과 헤드 영역의 데이터 비율을 뜻한다. )
+
+- 테일 영역: 압축이 완료된 레코드 (클린 로그) / 중복된 메시지 키가 없음
+- 헤드 영역: 압축 되기전 레코드 (더티 로그) / 중복된 메시지 키 있음
+
+```
+0  1  2  3  4  5  6
+K1 K2 K3 K3 K1 K2 K1
+V1 V1 V1 V2 V2 V2 V3
+|-----|  |-----|  |
+  테일      헤드   액티브
+
+dirty ratio = 3 / (3 + 3) = 더티 / (더티 + 클린)
+```
+
+dirty.ratio 옵션 설정을 높게 하면 한번 압축할 때 많은 데이터가 줄어들기 때문에 압축 효율이 좋다.
+그러나 그 때까지 용량을 차지하므로 용량 효율은 좋지 않다.
+
+옵션 설정을 낮게 하면 수시로 압축이 일어나기 때문에 메시지 키의 최근 데이터만 유지 하지만 브로커에 부담을 준다.
+
+- __```ISR (In-Sync-Replicas)```__
+
+리더 파티션과 팔로워 파티션이 모두 싱크된 상태를 뜻한다.
+
+( 리더 파티션의 모든 데이터가 팔로워 파티션에 복제 )
+
+데이터를 복제하는데에는 시간이 걸린다. 리더 파티션에 데이터를 쓰게 되고 파티션에서 복제를 할 때, 오프셋에 차이가 난다.
+
+```replica.lag.time.max.ms``` 옵션을 통해 데이터를 복제하는지 확인한다.
+팔로웦 파티션이 해당 값보다 긴 시간 동안 데이터를 복제하지 않으면 문제가 있음을 판단하고 ISR 그룹에서 제외한다.
+
+ISR로 묶인 파티션만 **리더**로 선출될 자격을 갖는다. (모든 데이터를 복제하기 때문에)
+
+```unclean.leader.election.enable``` true로 설정하면 ISR 그룹이 아니더라도 리더 선출이 가능하다.
+(데이터 유실은 되지만, 서비스 중단 없이 지속 사용)
+
+```
+브로커 #0      브로커 #1          ->     브로커 #0      브로커 #1
+(리더 파티션)   (팔로워 파티션)             (리더 파티션)   (리더 파티션)
+3            2                        3            2
+2            1                        2            1 
+1            0                        1            0
+0                                     0            -> 3 유실
+```
+
+데이터 중요도 < 서비스 무중단 운영 -> true
+
+데이터 중요도 > 서비스 무중단 운영 -> false
+
+***
+
+### 4-2. 카프카 프로듀서
+
+- __```acks 옵션```__
+
+프로듀서가 전송한 데이터가 얼마나 신뢰성 높게 저장될지 0, 1, -1(all) 값을 가질 수 있다.
+
+**acks = 0**
+
+리더 파티션으로 데이터가 전송됐을 때, 저장되었는지 확인하지 않는다는 뜻이다.
+보통 데이터가 저장된 후, 몇번째 오프셋인지 전송하는데 해당 값을 확인할 수 없다.
+
+```재전송 옵션(retries)``` 값이 2 이상으로 설정되어 있어도 무의미하다.
+
+데이터 전송 속도는 1이나 -1로 설정했을 때보다 훨씬 빠르지만 데이터 유실(네트워크 오류, 브로커 이슈 등)의 가능성이 존재한다.
+
+**acks = 1**
+
+리더 파티션에만 정상적으로 적재되었는지 확인한다. 정상적으로 적재되지 않으면 재시도를 한다.
+복제 개수를 2개 이상으로 하면 리더 파티션에 정상 적재되었어도 여전히 데이터 유실의 위험이 있다.
+
+( 팔로워 파티션에 적재되지 않은채 리더 파티션의 브로커가 장애나면 데이터 유실의 위험이 있음 )
+
+**acks = all or -1**
+
+리더 파티션과 팔로워 파티션 모두 정상 적재되었는지 확인한다. 그렇기 때문에 속도가 제일 느리다.
+
+```min.insync.replicas``` 옵션에 따라 데이터 안정성이 달라진다.
+해당 옵션은 ISR에 포함된 파티션을 뜻하기 때문에 1일때는 리더 파티션만 적재되면 되므로 acks=1일때와 동일하다.
+
+해당 값을 2이상 설정할 때부터 acks = all, -1의 효과가 있다.
+
+( 적어도 1개의 리더와 팔로워 파티션 보장 )
+
+또한 복제 개수도 고려해야 한다. 운영하는 브로커의 수 < min.insync.replicas인 경우 프로듀서가 전송 x
+
+무조건 min.insync.replicas의 값은 브로커 수보다 작아야 한다. (버전 업시 롤링 다운 타임시 프로듀서 중단 등)
+
+```
+안정적인 운영을 위해 브로커를 3대 이상 클러스터로 묶고, 복제 개수는 3, min.insync.replicas는 2로 설정
+```
+
+- __```멱등성 프로듀서```__
+
+__*멱등성*__
+
+여러 번 연산을 수행하더라도 같은 결과를 나타내는 것
+
+멱등성 프로듀서는 동일한 데이터를 여러 번 전송해도 클러스터에는 단 한번 저장된다.
+
+```enable.idempotence``` 옵션을 통해 정확히 한번 전송을 지원한다. (기본값은 false이고 true일 때 보장)
+
+기본 프로듀서와 다르게 데이터를 전송할 때, **PID**(Producer unique ID)와 **시퀀스 넘버**(sequence number)를 함께 전달한다.
+브로커의 입장에서는 PID와 시퀀스 넘버를 확인해서 동일한 데이터는 적재하지 않는다.
+
+다만, 동일한 세션(PID의 생명주기, 동일 애플리케이션)인 경우만 보장한다.
+동일 데이터라고 하더라도 다른 PID라면 다른 애플리케이션이 다른 데이터를 보냈다고 판단한다.
+
+시퀀스 넘버는 0부터 시작하여 1씩 증가한다. 일정하지 않은 시퀀스 넘버의 데이터가 도착하면 ```OutOfOrderSequenceException```이 발생한다.
+
+- __```트랜잭션 프로듀서```__
+
+다수의 파티션에 데이터를 적재할 경우, 원자성 보장(전체를 처리하거나 처리하지 않거나)을 위해 사용된다.
+
+트랜잭션은 파티션의 레코드로 구분한다. 트랜잭션의 시작과 끝을 표현하기 위해 트랜잭션 레코드를 하나 더 보낸다.
+이 때, 컨슈머는 트랜잭션 레코드를 보고 완료되었음을 확인하고 데이터를 가져간다. 
+
+=> 데이터만 존재하고 트랜잭션 레코드가 존재하지 않으면 아직 트랜잭션 완료 x
+
+***
+
+### 4-3. 카프카 컨슈머
+
+- __```멀티 스레드 컨슈머```__
+
+파티션 개수가 n개라면 동일 컨슈머 그룹내 컨슈머를 최대 n개 운영할 수 있다.
+- n개의 스레드를 가진 1개의 프로세스
+- 1개의 스레드를 가진 n개의 프로세스
+
+```
+컨슈머 그룹 A        토픽      컨슈머 그룹 B
+프로세스(스레드 0)   파티션 0    프로세스 (스레드 0, 1, 2)
+프로세스(스레드 1)   파티션 1
+프로세스(스레드 2)   파티션 2
+```
+
+멀티 스레드를 사용하는 경우, 고려해야 할 사항이 많다.
+- 비정상 종료시 데이터 중복, 유실
+- 스레드 세이프 로직, 변수 등
+
+```멀티 워커 스레드 전략```
+
+컨슈머 스레드는 1개만 실행하고 데이터 처리 담당하는 워커 스레드를 여러개 실행한다.
+
+한번 poll()을 통해 받은 데이터를 병렬처리하기 때문에 속도의 이점이 있다.
+하지만 데이터 처리가 끝나지 않았음에도 커밋을 하므로 리밸런싱, 컨슈머 장애시 데이터 유실 가능 등 위험이 있다.
+
+나중에 생성된 스레드의 처리 속도가 더 빠르다면 레코드 처리 역전현상(순서 뒤바뀜)이 발생할 수 있다.
+
+```컨슈머 멀티 스레드 전략```
+
+컨슈머 인스턴스에서 poll() 호출하는 스레드 여러 개 띄워 사용한다.
+
+- __```컨슈머 랙(LAG)```__
+
+컨슈머 랙은 토픽의 최신 오프셋과 컨슈머 오프셋간의 차이이다.
+
+```
+    프로듀서----|
+파티션 0 1 2 3 4 
+       |----컨슈머
+       
+LAG = 2 (LOG-END-OFFSET = 4 / CURRENT-OFFSET = 2)
+```
+컨슈머 랙은 컨슈머 그룹, 토픽, 파티션별로 생성된다.
+```
+토픽
+파티션 #0  0 1 2 3
+파티션 #1  0 1 2
+파티션 #2  0 1 2 3 4 5 6
+
+프로듀서 -> 3, 2, 6
+컨슈머 -> 1, 0, 4
+렉 -> 2(3-1), 2(2-0), 2(6-4)
+```
+
+프로듀서 처리량 > 컨슈머 처리량 => 랙 증가
+프로듀서 처리량 < 컨슈머 처리량 => 랙 감소 (0)
+
+컨슈머 랙을 모니터링함으로써 장애 확인이 가능하다.
+
+*컨슈머 랙 확인 방법*
+
+**카프카 명령어를 사용한 조회**
+
+```
+kafka-consumer-groups.sh --group {group-consumer-name} --describe
+
+TOPIC   PARTITION   CURRENT-OFFSET  LOG-END-OFFSET  LAG CONSUMER-ID HOST     CLIENT-ID
+test    0           2               5               3   consumer-01 /127.0.1 consumer-1
+test    1           2               2               0   consumer-02 /127.0.1 consumer-2
+test    2           2               3               1   consumer-03 /127.0.1 consumer-3     
+```
+일회성이기 때문에 보통 테스트용으로 사용한다.
+
+**컨슈머 metrics() 메서드를 사용한 조회**
+
+KafkaConsumer 인스턴스의 metrics() 메서드를 활용한다.
+즉, 컨슈머가 정상 동작할 때만 확인 가능하다.
+또한 모든 컨슈머 애플리케이션에 중복 코드가 작성되어야 하고 코드를 추가할 수 없는 경우 모니터링 불가능하다.
+
+**외부 모니터링 툴을 사용한 조회**
+
+```데이터 독```, ```컨플루언트 컨트롤 센터```와 같은 카프카 클러스터 종합 모니터링 툴을 사용할 수 있다.
+
+```카프카 버로우``` 같은 컨슈머 랙 모니터링 툴을 이용할 수 있다.
+
+버로우는 HTTP, SMTP 알람을 지원하나 데이터 적재 기능이 없기 때문에 랙 지표를 별도 저장소인 엘라스틱 서치 등에 저장하고
+대시보드(그라파나, 키바나)를 통해 조회, 알람 설정하는 것이 유지보수시 편리하다.
+
+**컨슈머 랙 모니터링 아키텍처**
+
+```
+- 버로우: REST API를 통해 컨슈머 랙을 조회
+- 텔레그래프: 데이터 수집 및 전달에 특화. 버로우를 조회하여 엘라스틱서치에 전달
+- 엘라스틱서치: 컨슈머 랙 정보를 담는 저장소
+- 그라파나: 엘라스틱서치의 정보를 시각화하고 특정 조건에 따라 슬랙 알람을 보내는 툴
+```
+
+- __```컨슈머 배포 프로세스```__
+
+**중단 배포**
+
+물리 장비에서 컨슈머 애플리케이션을 운영하는 경우 보통 이용한다. 
+
+이전 버전의 애플리케이션을 종료한 후 새 버전의 애플리케이션을 기동한다.
+
+새로운 로직이 적용된 신규 애플리케이션의 실행 전후를 명확히 구분할 수 있다.
+
+( 문제 생겼을 시 롤백하고 해당 오프셋으로 설정해서 다시 컨슘하면 된다. )
+
+**무중단 배포**
+
+가상 서버를 사용하는 경우 주로 이용한다. 
+
+- 블루/그린: 이전 버전 애플리케이션과 신규 버전을 동시에 띄워놓고 트래픽 전환
+- 롤링: 블루/그린 배포의 인스턴스 할당과 반환
+- 카나리: 소수에 먼저 적용해보고 전체에 배포
+
+***
+
+### 4-4. 스프링 카프카
+
+스프링 프레임워크에서 효과적으로 사용할 수 있게 만들어진 라이브러리이다.
+
+기존 카프카 클라이언트 라이브러리를 래핑해서 만들었다. 
+
+```
+스프링 카프카 -> 카프카 클라이언트 의존
+```
+
+**어드민**, **컨슈머**, **프로듀서**, **스트림즈** 기능을 제공한다.
+
+- __```스프링 카프카 프로듀서```__
+
+카프카 템플릿(**Kafka Template**)클래스를 이용하여 데이터를 전송하고 ProducerFactory를 통해서 생성한다.
+
+**기본 카프카 템플릿**
+
+기본 프로듀서 팩토리를 통해 생성된 카프카 템플릿을 사용한다.
+
+yml 파일에 옵션을 작성하면 스프링이 뜰 때, 오버라이드되어 실행된다.
+
+```
+spring.kafka.producer.acks
+spring.kafka.producer.batch-size
+spring.kafka.producer.bootstrap-servers
+spring.kafka.producer.buffer-memory
+spring.kafka.producer.client-id
+spring.kafka.producer.compression-type
+spring.kafka.producer.key-serializer
+spring.kafka.producer.properties.*
+spring.kafka.producer.retries
+spring.kafka.producer.transaction-id-prefix
+spring.kafka.producer.value-serializer
+```
+
+카프카 클라이언트의 옵션과 동일하나 필수값은 없다.
+기본적으로 **bootstrap-servers**는 ```localhost:9092```, **key-serializer**와 **value-serializer**는 ```StringSerializer```로 설정된다.
+
+send() 메서드를 오버로딩해서 여러 가지 데이터 전송 메서드를 만들 수 있다.
+
+```
+send(String topic, K key, V data)
+- 메시지 키, 값을 포함해서 특정 토픽으로 전달
+send(String topic, Integer partition, K key, V data)
+- 메시지 키, 값이 포함된 레코드를 특정 토픽의 특정 파티션으로 전달
+send(String topic, Integer partition, Long timestamp, K key, V data)
+- 메시지 키, 값, 타임스탬프가 포함된 레코드를 특정 토픽의 특정 파티션으로 전달
+send(ProducerRecord<K, V> record)
+- 프로듀서 레코드 객체를 전송
+```
+
+**커스텀 카프카 템플릿**
+
+프로듀서 팩토리를 통해 만든 카프카 템플릿 객체를 빈으로 등록하여 사용한다.
+
+A 클러스터, B 클러스터로 전송하는 카프카 프로듀서를 동시에 사용하고 싶으면 커스텀 카프카 템플릿을 이용한다.
+
+- __```스프링 카프카 컨슈머```__
+
+기존 컨슈머를 2개의 타입, 커밋을 7가지로 나누어 세분화했다.
+
+> 타입
+- 레코드 리스너(기본 타입): 단 1개의 레코드 처리
+- 배치 리스너: 한번에 여러개 레코드 처리
+
+외에도 
+```
+AcknowledgingMessageListener
+ConsumerAwareMessageListener
+AcknowledgingConsumerAwareMessageListener
+BatchAcknowledgingMessageListener
+BatchConsumerAwareMessageListener
+BatchAcknowledgingConsumerAwareMessageListener
+```
+
+존재한다.
+
+**기존 카프카 클라이언트**는 ```오토, 동기, 비동기``` 커밋 3가지로 나뉜다.
+
+**스프링 카프카 클라이언트**는 ```RECORD, BATCH, TIME, COOUNT, COUNT_TIME, MANUAL, MANUAL_IMMEDIATE``` 7가지로 세분화했다.
+
+> 커밋
+- RECORD: 레코드 단위로 프로세싱 이후 커밋
+- BATCH: poll() 메서드 호출된 레코드 모두 처리된 이후 커밋
+- TIME: 특정 시간 이후에 커밋
+- COUNT: 특정 개수만큼 레코드가 처리된 이후 커밋
+- COUNT_TIME: TIME, COUNT 중 조건이 하나라도 맞을 때 커밋
+- MANUAL: Acknowledgemnet.acknowledge() 메서드 호출되면 다음 poll() 때, 커밋
+- MANUAL_IMMEDIATE: Acknowledgemnet.acknowledge() 메서드를 호출한 즉시 커밋
+
+- __```기본 리스너 컨테이너```__
+
+yml 파일에 옵션을 설정해 애플리케이션이 뜰 때, 오버라이딩 된다.
+
+```
+spring.kafka.consumer.auto-commit-interval
+spring.kafka.consumer.auto-offset-reset
+spring.kafka.consumer.bootstrap-servers
+spring.kafka.consumer.client-id
+spring.kafka.consumer.enable-auto-commit
+spring.kafka.consumer.fetch-max-wait
+spring.kafka.consumer.fetch-min-size
+spring.kafka.consumer.group-id
+spring.kafka.consumer.heartbeat-interval
+spring.kafka.consumer.key-deserializer
+spring.kafka.consumer.max-poll-records
+spring.kafka.consumer.properties.*
+spring.kafka.consumer.value-deserializer
+spring.kafka.listener.ack-count
+spring.kafka.listener.ack-mode
+spring.kafka.listener.ack-time
+spring.kafka.listener.client-id
+spring.kafka.listener.concurrency
+spring.kafka.listener.idle-event-interval
+spring.kafka.listener.log-container-config
+spring.kafka.listener.monitor-interval
+spring.kafka.listener.no-poll-threshold
+spring.kafka.listener.poll-timeout
+spring.kafka.listener.tyype
+```
+
+- 레코드 리스너 (MessageListener)
+
+*spring.kafka.listener.type = RECORD*
+
+- 배치 리스너 (BatchMessageListener)
+
+*spring.kafka.listener.type = BATCH*
+
+파라미터로 받을 때 List로 받게 된다.
+
+- 배치 컨슈머 리스너 (BatchConsumerAwareMessageListener)
+
+컨슈머를 직접 사용하기 위해 Consumer 인스턴스를 파라미터로 받는다.
+
+- 배치 커밋 리스너 (BatchAcknowledgingMessageListener)
+
+컨테이너에서 관리하는 AckModed를 사용하기 위해 Acknowledgement 인스턴스를 파라미터로 받는다.
+
+*spring.kafka.listener.type = BATCH*
+
+*spring.kafka.listener.ack-mode = MANUAL_IMMEDIATE*
+
+- __```커스텀 리스너 컨테이너```__
+
+서로 다른 설정을 가진 2개 이상의 리스너, 리밸런스 리스너를 구현하기 위해 사용한다.
+
+카프카 리스너 컨테이너 팩토리 인스턴스를 생성해야 한다.
