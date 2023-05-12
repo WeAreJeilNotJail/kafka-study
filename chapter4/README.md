@@ -302,3 +302,155 @@ KafkaConsumer 인스턴스의 metrics() 메서드를 활용한다.
 - 블루/그린: 이전 버전 애플리케이션과 신규 버전을 동시에 띄워놓고 트래픽 전환
 - 롤링: 블루/그린 배포의 인스턴스 할당과 반환
 - 카나리: 소수에 먼저 적용해보고 전체에 배포
+
+***
+
+### 4-4. 스프링 카프카
+
+스프링 프레임워크에서 효과적으로 사용할 수 있게 만들어진 라이브러리이다.
+
+기존 카프카 클라이언트 라이브러리를 래핑해서 만들었다. 
+
+```
+스프링 카프카 -> 카프카 클라이언트 의존
+```
+
+**어드민**, **컨슈머**, **프로듀서**, **스트림즈** 기능을 제공한다.
+
+- __```스프링 카프카 프로듀서```__
+
+카프카 템플릿(**Kafka Template**)클래스를 이용하여 데이터를 전송하고 ProducerFactory를 통해서 생성한다.
+
+**기본 카프카 템플릿**
+
+기본 프로듀서 팩토리를 통해 생성된 카프카 템플릿을 사용한다.
+
+yml 파일에 옵션을 작성하면 스프링이 뜰 때, 오버라이드되어 실행된다.
+
+```
+spring.kafka.producer.acks
+spring.kafka.producer.batch-size
+spring.kafka.producer.bootstrap-servers
+spring.kafka.producer.buffer-memory
+spring.kafka.producer.client-id
+spring.kafka.producer.compression-type
+spring.kafka.producer.key-serializer
+spring.kafka.producer.properties.*
+spring.kafka.producer.retries
+spring.kafka.producer.transaction-id-prefix
+spring.kafka.producer.value-serializer
+```
+
+카프카 클라이언트의 옵션과 동일하나 필수값은 없다.
+기본적으로 **bootstrap-servers**는 ```localhost:9092```, **key-serializer**와 **value-serializer**는 ```StringSerializer```로 설정된다.
+
+send() 메서드를 오버로딩해서 여러 가지 데이터 전송 메서드를 만들 수 있다.
+
+```
+send(String topic, K key, V data)
+- 메시지 키, 값을 포함해서 특정 토픽으로 전달
+send(String topic, Integer partition, K key, V data)
+- 메시지 키, 값이 포함된 레코드를 특정 토픽의 특정 파티션으로 전달
+send(String topic, Integer partition, Long timestamp, K key, V data)
+- 메시지 키, 값, 타임스탬프가 포함된 레코드를 특정 토픽의 특정 파티션으로 전달
+send(ProducerRecord<K, V> record)
+- 프로듀서 레코드 객체를 전송
+```
+
+**커스텀 카프카 템플릿**
+
+프로듀서 팩토리를 통해 만든 카프카 템플릿 객체를 빈으로 등록하여 사용한다.
+
+A 클러스터, B 클러스터로 전송하는 카프카 프로듀서를 동시에 사용하고 싶으면 커스텀 카프카 템플릿을 이용한다.
+
+- __```스프링 카프카 컨슈머```__
+
+기존 컨슈머를 2개의 타입, 커밋을 7가지로 나누어 세분화했다.
+
+> 타입
+- 레코드 리스너(기본 타입): 단 1개의 레코드 처리
+- 배치 리스너: 한번에 여러개 레코드 처리
+
+외에도 
+```
+AcknowledgingMessageListener
+ConsumerAwareMessageListener
+AcknowledgingConsumerAwareMessageListener
+BatchAcknowledgingMessageListener
+BatchConsumerAwareMessageListener
+BatchAcknowledgingConsumerAwareMessageListener
+```
+
+존재한다.
+
+**기존 카프카 클라이언트**는 ```오토, 동기, 비동기``` 커밋 3가지로 나뉜다.
+
+**스프링 카프카 클라이언트**는 ```RECORD, BATCH, TIME, COOUNT, COUNT_TIME, MANUAL, MANUAL_IMMEDIATE``` 7가지로 세분화했다.
+
+> 커밋
+- RECORD: 레코드 단위로 프로세싱 이후 커밋
+- BATCH: poll() 메서드 호출된 레코드 모두 처리된 이후 커밋
+- TIME: 특정 시간 이후에 커밋
+- COUNT: 특정 개수만큼 레코드가 처리된 이후 커밋
+- COUNT_TIME: TIME, COUNT 중 조건이 하나라도 맞을 때 커밋
+- MANUAL: Acknowledgemnet.acknowledge() 메서드 호출되면 다음 poll() 때, 커밋
+- MANUAL_IMMEDIATE: Acknowledgemnet.acknowledge() 메서드를 호출한 즉시 커밋
+
+- __```기본 리스너 컨테이너```__
+
+yml 파일에 옵션을 설정해 애플리케이션이 뜰 때, 오버라이딩 된다.
+
+```
+spring.kafka.consumer.auto-commit-interval
+spring.kafka.consumer.auto-offset-reset
+spring.kafka.consumer.bootstrap-servers
+spring.kafka.consumer.client-id
+spring.kafka.consumer.enable-auto-commit
+spring.kafka.consumer.fetch-max-wait
+spring.kafka.consumer.fetch-min-size
+spring.kafka.consumer.group-id
+spring.kafka.consumer.heartbeat-interval
+spring.kafka.consumer.key-deserializer
+spring.kafka.consumer.max-poll-records
+spring.kafka.consumer.properties.*
+spring.kafka.consumer.value-deserializer
+spring.kafka.listener.ack-count
+spring.kafka.listener.ack-mode
+spring.kafka.listener.ack-time
+spring.kafka.listener.client-id
+spring.kafka.listener.concurrency
+spring.kafka.listener.idle-event-interval
+spring.kafka.listener.log-container-config
+spring.kafka.listener.monitor-interval
+spring.kafka.listener.no-poll-threshold
+spring.kafka.listener.poll-timeout
+spring.kafka.listener.tyype
+```
+
+- 레코드 리스너 (MessageListener)
+
+*spring.kafka.listener.type = RECORD*
+
+- 배치 리스너 (BatchMessageListener)
+
+*spring.kafka.listener.type = BATCH*
+
+파라미터로 받을 때 List로 받게 된다.
+
+- 배치 컨슈머 리스너 (BatchConsumerAwareMessageListener)
+
+컨슈머를 직접 사용하기 위해 Consumer 인스턴스를 파라미터로 받는다.
+
+- 배치 커밋 리스너 (BatchAcknowledgingMessageListener)
+
+컨테이너에서 관리하는 AckModed를 사용하기 위해 Acknowledgement 인스턴스를 파라미터로 받는다.
+
+*spring.kafka.listener.type = BATCH*
+
+*spring.kafka.listener.ack-mode = MANUAL_IMMEDIATE*
+
+- __```커스텀 리스너 컨테이너```__
+
+서로 다른 설정을 가진 2개 이상의 리스너, 리밸런스 리스너를 구현하기 위해 사용한다.
+
+카프카 리스너 컨테이너 팩토리 인스턴스를 생성해야 한다.
